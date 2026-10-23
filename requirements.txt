@@ -1,0 +1,6 @@
+# Direct dependencies exercised on Python 3.12. Optional UI/LSTM are separate.
+yfinance==1.7.0
+pandas==2.2.3
+numpy==2.3.5
+scikit-learn==1.8.0
+lightgbm==4.7.0
