@@ -1,21 +1,26 @@
-import streamlit as st
-import pandas as pd
+"""Optional dashboard: delegates to the same validated evaluation path as the CLI."""
 
-from .data import prepare_dataset
-from .features import add_technical_features, add_calendar_features
-from .models import train_lightgbm
+import streamlit as st
+
+from stockpredictor.backtest import rolling_window_backtest
 
 
 def main():
-    st.title("Stock Predictor Dashboard")
+    st.title("Short-horizon stock research")
+    st.caption("Price-only, next-open entries. No news, intraday stops or live execution.")
     ticker = st.text_input("Ticker", "AAPL")
-    if st.button("Train and Predict"):
-        df = prepare_dataset(ticker)
-        df = add_technical_features(df)
-        df = add_calendar_features(df)
-        model, rmse = train_lightgbm(df)
-        st.write(f"Model trained. RMSE={rmse:.4f}")
-        st.line_chart(df["Close"])
+    end = st.text_input("Exclusive data cutoff (YYYY-MM-DD)", "")
+    horizon = st.selectbox("Holding sessions (entry open to final close)", [1, 2, 3])
+    cost = st.number_input("Assumed cost per side (basis points)", min_value=0.0, value=10.0)
+    if st.button("Run walk-forward evaluation"):
+        try:
+            result = rolling_window_backtest(ticker, end=end, horizon=horizon, cost_bps=cost)
+        except (ValueError, ImportError) as exc:
+            st.error(str(exc))
+            return
+        st.json(result.metrics)
+        st.line_chart(result.equity["equity"])
+        st.dataframe(result.predictions)
 
 
 if __name__ == "__main__":

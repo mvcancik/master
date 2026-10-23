@@ -1,42 +1,73 @@
-import argparse
+"""Command-line research evaluation with an explicit completed-data cutoff."""
 
-from .data import prepare_dataset
-from .features import add_technical_features, add_calendar_features
-from .models import train_lightgbm, train_lstm
-from .backtest import rolling_window_backtest
+import argparse
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from .backtest import forecast_next_open, walk_forward
+from .data import prepare_dataset, validate_prices
+
+
+def _load(args):
+    if args.csv:
+        prices = pd.read_csv(args.csv, index_col=0, parse_dates=True)
+        prices = prices.loc[prices.index < pd.Timestamp(args.end)]
+        return validate_prices(prices)
+    return prepare_dataset(args.ticker, end=args.end)
 
 
 def run_train(args):
-    df = prepare_dataset(args.ticker)
-    df = add_technical_features(df)
-    df = add_calendar_features(df)
-    if args.model == "lightgbm":
-        model, rmse = train_lightgbm(df)
-    else:
-        model, rmse = train_lstm(df, epochs=args.epochs)
-    print(f"Training completed. RMSE={rmse:.4f}")
+    forecast = forecast_next_open(
+        _load(args), horizon=args.horizon, model_type=args.model,
+        window=args.window, min_train=args.min_train,
+        lookback=args.lookback, epochs=args.epochs)
+    print(json.dumps(forecast, indent=2, allow_nan=False))
 
 
 def run_backtest(args):
-    _, rmse = rolling_window_backtest(args.ticker, model_type=args.model)
-    print(f"Backtest RMSE={rmse:.4f}")
+    result = walk_forward(
+        _load(args), horizon=args.horizon, model_type=args.model,
+        window=args.window, min_train=args.min_train, refit_every=args.refit_every,
+        lookback=args.lookback, epochs=args.epochs,
+        cost_bps=args.cost_bps, threshold=args.threshold)
+    print(json.dumps(result.metrics, indent=2, allow_nan=False))
+    if args.output:
+        output = Path(args.output)
+        output.mkdir(parents=True, exist_ok=True)
+        result.predictions.to_csv(output / "predictions.csv")
+        result.trades.to_csv(output / "trades.csv", index=False)
+        result.equity.to_csv(output / "equity.csv")
+        (output / "metrics.json").write_text(
+            json.dumps(result.metrics, indent=2, allow_nan=False) + "\n")
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Stock prediction toolkit")
-    subparsers = parser.add_subparsers(dest="command")
-
-    train_p = subparsers.add_parser("train", help="Train a model")
-    train_p.add_argument("ticker", help="Ticker symbol")
-    train_p.add_argument("--model", choices=["lightgbm", "lstm"], default="lightgbm")
-    train_p.add_argument("--epochs", type=int, default=10)
-    train_p.set_defaults(func=run_train)
-
-    back_p = subparsers.add_parser("backtest", help="Run rolling window backtest")
-    back_p.add_argument("ticker", help="Ticker symbol")
-    back_p.add_argument("--model", choices=["lightgbm", "lstm"], default="lightgbm")
-    back_p.set_defaults(func=run_backtest)
-
+def build_arg_parser():
+    parser = argparse.ArgumentParser(description="Short-horizon stock research")
+    commands = parser.add_subparsers(dest="command")
+    for command in ("train", "backtest"):
+        sub = commands.add_parser(command)
+        sub.add_argument("ticker", help="Single ticker (also a label with --csv)")
+        sub.add_argument("--end", required=True,
+                         help="Exclusive YYYY-MM-DD cutoff; all earlier bars must be complete")
+        sub.add_argument("--csv", help="Frozen daily OHLCV CSV; first column is session date")
+        sub.add_argument("--model", choices=["lightgbm", "ridge", "lstm"], default="lightgbm")
+        sub.add_argument("--horizon", type=int, choices=[1, 2, 3], default=1)
+        sub.add_argument("--window", type=int, default=252)
+        sub.add_argument("--min-train", type=int, default=126)
+        sub.add_argument("--lookback", type=int, default=20)
+        sub.add_argument("--epochs", type=int, default=10)
+        if command == "backtest":
+            sub.add_argument("--refit-every", type=int, default=1)
+            sub.add_argument("--cost-bps", type=float, default=10.0,
+                             help="Assumed execution cost in basis points PER SIDE")
+            sub.add_argument("--threshold", type=float, default=0.0,
+                             help="Minimum predicted NET return, decimal units")
+            sub.add_argument("--output", help="Write predictions, trades, daily equity and metrics")
+            sub.set_defaults(func=run_backtest)
+        else:
+            sub.set_defaults(func=run_train)
     return parser
 
 
